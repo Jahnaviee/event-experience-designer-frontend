@@ -1,5 +1,5 @@
 import { Link } from "react-router-dom";
-import { useEvents } from "../context/EventContext.jsx";
+import { useEvents } from "../Context/EventContext.jsx";
 
 function Dashboard() {
 

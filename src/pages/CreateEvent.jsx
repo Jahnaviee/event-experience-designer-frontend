@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { useEvents } from "../context/EventContext";
+import { useEvents } from "../Context/EventContext";
 
 function CreateEvent() {
   const navigate = useNavigate();
