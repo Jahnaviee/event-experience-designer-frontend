@@ -7,22 +7,44 @@ import {
 
 const EventContext = createContext();
 
-const API_URL = "/api/events";
+// Remove trailing slashes to prevent URLs such as /api/events//1.
+const API_URL = "https://event-experience-designer-backend.onrender.com/api/events";
 
-// Convert backend event data into the format used by the React UI.
-function formatEvent(event) {
+// Read JSON safely and give useful errors for unexpected responses.
+async function readResponse(response) {
+  const text = await response.text();
+
+  if (!text.trim()) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(
+      `Server returned invalid JSON (HTTP ${response.status}). ` +
+      `Response: ${text.slice(0, 200)}`
+    );
+  }
+}
+
+// Convert backend event data into the format used by React.
+function formatEvent(event = {}) {
   return {
     ...event,
     id: event.id,
     date: event.eventDate || event.date || "",
     venue: event.location || event.venue || "",
     location: event.location || event.venue || "",
-    status: event.published ? "Published" : "Draft",
+    status:
+      event.published || event.isPublished
+        ? "Published"
+        : event.status || "Draft",
     createdAt: event.createdAt || new Date().toISOString(),
   };
 }
 
-// Convert frontend event data into the format accepted by Spring Boot.
+// Convert frontend event data into the Spring Boot format.
 function formatPayload(event) {
   return {
     title: event.title,
@@ -38,42 +60,55 @@ function formatPayload(event) {
   };
 }
 
+// Make requests and report HTTP errors clearly.
+async function apiRequest(url, options = {}) {
+  let response;
+
+  try {
+    response = await fetch(url, options);
+  } catch (error) {
+    throw new Error(
+      `Cannot connect to the backend. Check the API URL, CORS settings, ` +
+      `and backend deployment. ${error.message}`
+    );
+  }
+
+  if (!response.ok) {
+    const message = await response.text();
+
+    throw new Error(
+      `API request failed: HTTP ${response.status} ${response.statusText}. ` +
+      `URL: ${url}. ` +
+      `Response: ${message.slice(0, 200) || "(empty response)"}`
+    );
+  }
+
+  return readResponse(response);
+}
+
 export function EventProvider({ children }) {
   const [events, setEvents] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
-  // Load events from the Spring Boot backend.
   const fetchEvents = async () => {
     try {
       setLoading(true);
       setError("");
 
-      const response = await fetch(API_URL);
+      const data = await apiRequest(API_URL);
 
-      if (!response.ok) {
+      if (!Array.isArray(data)) {
         throw new Error(
-          `Could not load events. Server status: ${response.status}`
+          `Expected an array of events from ${API_URL}, ` +
+          "but the server returned something else."
         );
       }
 
-      const data = await response.json();
-
-      // Diagnostic logs: check what the frontend receives.
-      console.log("Events received from backend:", data);
-
-      const formattedEvents = data.map(formatEvent);
-
-      console.log("Formatted events:", formattedEvents);
-
-      setEvents(formattedEvents);
+      setEvents(data.map(formatEvent));
     } catch (err) {
       console.error("Fetch events error:", err);
-
-      setError(
-        err.message ||
-          "Unable to connect to the backend. Please check that Spring Boot is running."
-      );
+      setError(err.message || "Unable to load events.");
     } finally {
       setLoading(false);
     }
@@ -83,12 +118,11 @@ export function EventProvider({ children }) {
     fetchEvents();
   }, []);
 
-  // Create an event in the database.
   const addEvent = async (event) => {
     try {
       setError("");
 
-      const response = await fetch(API_URL, {
+      const savedEvent = await apiRequest(API_URL, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -96,16 +130,11 @@ export function EventProvider({ children }) {
         body: JSON.stringify(formatPayload(event)),
       });
 
-      if (!response.ok) {
-        throw new Error(
-          `Could not create the event. Server status: ${response.status}`
-        );
-      }
-
-      const savedEvent = await response.json();
       const formattedEvent = formatEvent({
         ...event,
-        ...savedEvent,
+        ...(savedEvent && typeof savedEvent === "object"
+          ? savedEvent
+          : {}),
       });
 
       setEvents((previousEvents) => [
@@ -113,9 +142,7 @@ export function EventProvider({ children }) {
         formattedEvent,
       ]);
 
-      console.log("Created event:", formattedEvent);
-
-      return savedEvent;
+      return savedEvent || formattedEvent;
     } catch (err) {
       console.error("Create event error:", err);
       setError(err.message || "Failed to create event.");
@@ -123,7 +150,6 @@ export function EventProvider({ children }) {
     }
   };
 
-  // Update an existing event in the database.
   const updateEvent = async (id, updatedEvent) => {
     try {
       setError("");
@@ -141,7 +167,7 @@ export function EventProvider({ children }) {
         ...updatedEvent,
       };
 
-      const response = await fetch(`${API_URL}/${id}`, {
+      const savedEvent = await apiRequest(`${API_URL}/${id}`, {
         method: "PUT",
         headers: {
           "Content-Type": "application/json",
@@ -149,18 +175,11 @@ export function EventProvider({ children }) {
         body: JSON.stringify(formatPayload(mergedEvent)),
       });
 
-      if (!response.ok) {
-        throw new Error(
-          `Could not update the event. Server status: ${response.status}`
-        );
-      }
-
-      const savedEvent = await response.json();
-
       const formattedEvent = formatEvent({
-        ...currentEvent,
-        ...updatedEvent,
-        ...savedEvent,
+        ...mergedEvent,
+        ...(savedEvent && typeof savedEvent === "object"
+          ? savedEvent
+          : {}),
       });
 
       setEvents((previousEvents) =>
@@ -171,9 +190,7 @@ export function EventProvider({ children }) {
         )
       );
 
-      console.log("Updated event:", formattedEvent);
-
-      return savedEvent;
+      return savedEvent || formattedEvent;
     } catch (err) {
       console.error("Update event error:", err);
       setError(err.message || "Failed to update event.");
@@ -181,28 +198,19 @@ export function EventProvider({ children }) {
     }
   };
 
-  // Delete an event from the database.
   const deleteEvent = async (id) => {
     try {
       setError("");
 
-      const response = await fetch(`${API_URL}/${id}`, {
+      await apiRequest(`${API_URL}/${id}`, {
         method: "DELETE",
       });
-
-      if (!response.ok) {
-        throw new Error(
-          `Could not delete the event. Server status: ${response.status}`
-        );
-      }
 
       setEvents((previousEvents) =>
         previousEvents.filter(
           (event) => String(event.id) !== String(id)
         )
       );
-
-      console.log("Deleted event ID:", id);
     } catch (err) {
       console.error("Delete event error:", err);
       setError(err.message || "Failed to delete event.");
@@ -210,7 +218,6 @@ export function EventProvider({ children }) {
     }
   };
 
-  // Publish an event in the database.
   const publishEvent = async (id) => {
     const event = events.find(
       (item) => String(item.id) === String(id)
